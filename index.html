@@ -371,6 +371,7 @@ input[type=range]{height:40px}
       <label class="field">Nombre<input type="text" id="mixName"></label>
       <label class="field">Crossfade de entrada (s)<input type="number" id="mixXf" min="0.1" max="10" step="0.1" placeholder="Por defecto"></label>
     </div>
+    <label class="field">Al terminar la escena<select id="mixEnd" class="txt"><option value="next">▶ Pasar sola a la siguiente escena</option><option value="loop">⟲ Repetir hasta que yo avance (pedal / botón)</option></select></label>
     <label class="field">Nota para el escenario (se ve en grande en vivo)<input type="text" id="mixNote" maxlength="140" placeholder="Ej: Capo 2 · entra voz en el compás 8"></label>
     <div class="row" style="margin-bottom:6px">
       <button class="btn primary" id="btnAudition">▶ Escuchar esta escena</button>
@@ -518,9 +519,10 @@ input[type=range]{height:40px}
 'use strict';
 /* ===================== Versión ===================== */
 // IMPORTANTE: subir APP_VERSION y agregar una línea a CHANGELOG en CADA cambio de la app.
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const APP_DATE = '2026-11-14';
 const CHANGELOG = [
+  ['1.4.0', 'Avance automático a la siguiente escena al terminar (o repetir, por escena) · tiempo compacto'],
   ['1.3.0', 'Barra de escena: tiempo en escena, ciclo y barra de progreso'],
   ['1.2.0', 'Botón de versión en la barra superior'],
   ['1.1.0', 'Botones escena anterior / siguiente bajo Detener (pantalla Escenas)'],
@@ -578,7 +580,7 @@ const DB = (() => {
 
 /* ===================== Estado ===================== */
 const DEFAULT_SETTINGS = { masterVolume: 0.9, defaultCrossfadeSeconds: 2.0, bpm: 120, quantizeSceneChanges: false };
-const newScene = name => ({ sceneId: uid('scn'), orderIndex: 0, name, crossfadeDurationOverride: null, notes: '', tracks: [] });
+const newScene = name => ({ sceneId: uid('scn'), orderIndex: 0, name, crossfadeDurationOverride: null, notes: '', onEnd: 'next', tracks: [] });
 const newProject = (name = 'Mi set') => ({ schemaVersion: '1.0.0', projectId: uid('proj'), projectName: name, globalSettings: { ...DEFAULT_SETTINGS }, audioPool: [], scenes: [newScene('01 - Escena')] });
 // La etiqueta la elige el usuario. Internamente se conserva el campo "category" del esquema.
 const LABELS = { OTHER: 'Sin etiqueta', DRUM_LOOP: '🥁 Ritmo', PAD: '🌫 Fondo' };
@@ -929,7 +931,7 @@ function normalize(m) {
   m.globalSettings = { ...DEFAULT_SETTINGS, ...(m.globalSettings || {}) };
   m.audioPool = (m.audioPool || []).filter(a => a && a.assetId).map(normAsset);
   m.scenes = (m.scenes || []).slice().sort((a, b) => (a.orderIndex ?? 0) - (b.orderIndex ?? 0)).map(s => ({
-    sceneId: s.sceneId || uid('scn'), orderIndex: 0, name: s.name || 'Escena', crossfadeDurationOverride: s.crossfadeDurationOverride ?? null, notes: s.notes || '',
+    sceneId: s.sceneId || uid('scn'), orderIndex: 0, name: s.name || 'Escena', crossfadeDurationOverride: s.crossfadeDurationOverride ?? null, notes: s.notes || '', onEnd: s.onEnd === 'loop' ? 'loop' : 'next',
     tracks: (s.tracks || []).filter(t => t && t.assetId).map(t => ({ assetId: t.assetId, volume: t.volume ?? 0.8, pan: t.pan ?? 0, loop: t.loop !== false, mute: !!t.mute, solo: !!t.solo })),
   }));
   if (!m.scenes.length) m.scenes.push(newScene('01 - Escena'));
@@ -1076,7 +1078,7 @@ const UI = {
       const playing = s.sceneId === Engine.currentId;
       return `<li class="scene ${i === S.selected ? 'sel' : ''} ${playing ? 'live' : ''}" data-i="${i}" draggable="true">
       <span class="handle" aria-hidden="true">⋮⋮</span>
-      <button class="sname" data-act="select"><span class="num">${i + 1}</span>${esc(s.name)}<small>${playing ? '● sonando · ' : ''}${s.tracks.length} sonido(s) · crossfade ${xfOf(s).toFixed(1)} s</small></button>
+      <button class="sname" data-act="select"><span class="num">${i + 1}</span>${esc(s.name)}<small>${playing ? '● sonando · ' : ''}${s.tracks.length} sonido(s) · crossfade ${xfOf(s).toFixed(1)} s · ${s.onEnd === 'loop' ? '⟲ repite' : '▶ avanza sola'}</small></button>
       ${playing ? '<button class="btn playbtn danger" data-act="stop" aria-label="Detener">■</button>' : '<button class="btn playbtn" data-act="play" aria-label="Escuchar">▶</button>'}
       <div class="sbtns">
         <button class="btn icon ghost" data-act="up" ${i ? '' : 'disabled'} aria-label="Subir">↑</button>
@@ -1092,6 +1094,7 @@ const UI = {
     $('#mixName').value = sc.name;
     $('#mixXf').value = sc.crossfadeDurationOverride ?? '';
     $('#mixNote').value = sc.notes || '';
+    $('#mixEnd').value = sc.onEnd === 'loop' ? 'loop' : 'next';
     $('#mixXf').placeholder = `Por defecto (${P().globalSettings.defaultCrossfadeSeconds} s)`;
     $('#mixLive').textContent = sc.sceneId === Engine.currentId ? '● Sonando: los cambios se oyen en vivo' : '';
     const row = t => {
@@ -1155,22 +1158,36 @@ const UI = {
 
 /* ---------- Reloj de la barra de escena ---------- */
 const fmtClock = s => { s = Math.max(0, Math.floor(+s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
-// Progreso = posición dentro del sonido audible más largo de la escena (su ciclo, o su final si no repite).
+// Duración de la escena = el sonido audible más largo (una pasada).
+function sceneLength(sc) {
+  let len = 0;
+  for (const tr of sc.tracks) { const buf = S.buffers.get(tr.assetId); if (buf && trackGain(sc, tr) > 0) len = Math.max(len, buf.duration); }
+  return len;
+}
+// Se llama cada 250 ms: actualiza la barra y, si corresponde, pasa sola a la siguiente escena.
 function tickTransport() {
-  const t = $('#transport'); if (t.hidden || t.classList.contains('pv') || !Engine.ctx) return;
+  if (!Engine.ctx || Engine.stopped) return;
   const sc = P().scenes.find(s => s.sceneId === Engine.currentId); if (!sc) return;
   const now = Engine.ctx.currentTime, el = Engine.sceneStart != null ? Math.max(0, now - Engine.sceneStart) : 0;
-  let best = null;
-  for (const tr of sc.tracks) {
-    const v = Engine.voices.get(tr.assetId), buf = S.buffers.get(tr.assetId);
-    if (!v || !buf || trackGain(sc, tr) === 0) continue;
-    if (!best || buf.duration > best.dur) best = { v, dur: buf.duration, loop: tr.loop !== false };
+  const len = sceneLength(sc), loop = sc.onEnd === 'loop';
+  // Avance automático: el crossfade arranca antes del final para que la transición termine justo al acabar la escena.
+  if (len > 0 && !loop && Engine.autoFired !== Engine.sceneStart) {
+    const i = P().scenes.indexOf(sc), nx = P().scenes[i + 1];
+    const lead = Math.min(nx ? xfOf(nx) : xfOf(sc), len / 2);
+    if (el >= len - lead) {
+      Engine.autoFired = Engine.sceneStart;
+      if (nx) Engine.next(); else { Engine.stopAll(lead); toast('Fin del setlist'); }
+      return;
+    }
   }
-  let txt = `⏱ ${fmtClock(el)} en escena`, pct = 0;
-  if (best) {
-    const run = Math.max(0, now - best.v.t0 + best.v.off), pos = best.loop ? run % best.dur : Math.min(run, best.dur);
-    pct = pos / best.dur * 100;
-    txt += ` · ${best.loop ? 'ciclo: ' : ''}quedan ${fmtClock(best.dur - pos)} de ${fmtClock(best.dur)}`;
+  const t = $('#transport'); if (t.hidden || t.classList.contains('pv')) return;
+  let txt = '⏱ ' + fmtClock(el), pct = 0;
+  if (len > 0) {
+    const pos = loop ? el % len : Math.min(el, len);
+    pct = pos / len * 100;
+    txt = (loop ? '⟲ ' : '⏱ ') + `${fmtClock(pos)} / ${fmtClock(len)}`;
+    const i = P().scenes.indexOf(sc), nx = P().scenes[i + 1];
+    txt += loop ? ' · repite' : nx ? ` · luego: ${nx.name}` : ' · última';
   }
   $('#tpTime').textContent = txt; $('#tpFill').style.width = pct.toFixed(1) + '%';
 }
@@ -1289,6 +1306,7 @@ function bind() {
   $('#mixName').oninput = e => { selScene().name = e.target.value; UI.scenes(); UI.transport(); if (S.stageOpen) UI.stage(); scheduleSave(); };
   $('#mixName').onchange = () => UI.mix();
   $('#mixNote').oninput = e => { selScene().notes = e.target.value; if (S.stageOpen) UI.stage(); scheduleSave(); };
+  $('#mixEnd').onchange = e => { selScene().onEnd = e.target.value; UI.scenes(); scheduleSave(); };
   $('#mixXf').onchange = e => {
     const v = parseFloat(e.target.value);
     selScene().crossfadeDurationOverride = isFinite(v) ? clamp(v, 0.1, 10) : null;
