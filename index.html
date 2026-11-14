@@ -267,6 +267,9 @@ input[type=range]{height:40px}
 @keyframes pulse{50%{opacity:.3}}
 #tpTxt{font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tinfo{min-width:0;display:flex;flex-direction:column;gap:3px}
+.ttrack{font-size:13px;color:#cfe9da;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ttrack:empty{display:none}
+.transport.pv .ttrack{display:none}
 .ttime{font-size:13px;color:#bff5d6;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tbar{height:8px;border-radius:999px;background:rgba(0,0,0,.35);overflow:hidden}
 #tpFill{height:100%;width:0;background:linear-gradient(90deg,#4aa3ff,#22e07a)}
@@ -340,7 +343,7 @@ input[type=range]{height:40px}
   </nav>
   <div id="transport" class="transport" hidden>
     <span class="tdot"></span>
-    <div class="tinfo grow"><span id="tpTxt"></span><span id="tpTime" class="ttime"></span><div class="tbar"><div id="tpFill"></div></div></div>
+    <div class="tinfo grow"><span id="tpTxt"></span><span id="tpTrack" class="ttrack"></span><span id="tpTime" class="ttime"></span><div class="tbar"><div id="tpFill"></div></div></div>
     <div class="tright">
       <button class="btn tstop" id="tpStop">■ Detener</button>
       <div class="tnav">
@@ -519,9 +522,10 @@ input[type=range]{height:40px}
 'use strict';
 /* ===================== Versión ===================== */
 // IMPORTANTE: subir APP_VERSION y agregar una línea a CHANGELOG en CADA cambio de la app.
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 const APP_DATE = '2026-11-14';
 const CHANGELOG = [
+  ['1.5.0', 'Barra de escena: muestra el nombre de la pista (o Multitrack) bajo el nombre de la escena'],
   ['1.4.0', 'Avance automático a la siguiente escena al terminar (o repetir, por escena) · tiempo compacto'],
   ['1.3.0', 'Barra de escena: tiempo en escena, ciclo y barra de progreso'],
   ['1.2.0', 'Botón de versión en la barra superior'],
@@ -1181,6 +1185,8 @@ function tickTransport() {
     }
   }
   const t = $('#transport'); if (t.hidden || t.classList.contains('pv')) return;
+  const n = sc.tracks.length, a1 = n === 1 ? getAsset(sc.tracks[0].assetId) : null;
+  $('#tpTrack').textContent = n === 0 ? '' : n === 1 ? '🎵 ' + (a1 ? a1.displayName : '(sonido eliminado)') : `🎛 Multitrack · ${n} pistas`;
   let txt = '⏱ ' + fmtClock(el), pct = 0;
   if (len > 0) {
     const pos = loop ? el % len : Math.min(el, len);
