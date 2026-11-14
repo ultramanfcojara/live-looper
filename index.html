@@ -102,6 +102,7 @@ kbd{background:#232a33;border:1px solid #39424e;border-bottom-width:2px;border-r
 .card{background:var(--panel2);border:1px solid var(--line);border-radius:16px;padding:22px;max-width:420px;width:100%;text-align:center}
 .card h1{font-size:20px;margin:0 0 8px}.card p{color:var(--mute);margin:0 0 18px;font-size:14px}
 .card .btn{width:100%;min-height:54px;font-size:17px}
+#modalMsg{white-space:pre-line}
 #modal .card{text-align:left}#modal .row{justify-content:flex-end;margin-top:14px}#modal .btn{width:auto;min-height:40px;font-size:15px}
 #toast{position:fixed;left:50%;top:calc(64px + env(safe-area-inset-top));transform:translateX(-50%) translateY(-20px);background:#222a33;border:1px solid #39424e;padding:10px 16px;border-radius:12px;opacity:0;pointer-events:none;transition:.25s;z-index:70;max-width:90vw;text-align:center}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
@@ -321,6 +322,7 @@ input[type=range]{height:40px}
 <header>
   <button id="setChip" class="setchip" title="Ver y cambiar de set"><small>Set abierto</small><span id="setName">Mi set</span></button>
   <span id="status" class="badge"><span class="dot"></span><span id="statusTxt">Motor apagado</span></span>
+  <button id="verBtn" class="btn sm ghost" title="Ver versión de la app" aria-label="Ver versión de la app"></button>
   <button id="btnStage" class="btn live">● Modo En Vivo</button>
 </header>
 
@@ -508,6 +510,16 @@ input[type=range]{height:40px}
 
 <script>
 'use strict';
+/* ===================== Versión ===================== */
+// IMPORTANTE: subir APP_VERSION y agregar una línea a CHANGELOG en CADA cambio de la app.
+const APP_VERSION = '1.2.0';
+const APP_DATE = '2026-11-14';
+const CHANGELOG = [
+  ['1.2.0', 'Botón de versión en la barra superior'],
+  ['1.1.0', 'Botones escena anterior / siguiente bajo Detener (pantalla Escenas)'],
+  ['1.0.0', 'Versión base: biblioteca, sets, escenas, mezcla y Modo En Vivo'],
+];
+
 /* ===================== Utilidades ===================== */
 const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1164,6 +1176,8 @@ function bind() {
     else $('#startMsg').textContent = 'El navegador no habilitó el audio. Toca de nuevo.';
   };
   $('#setChip').onclick = () => setTab('project');
+  $('#verBtn').textContent = 'v' + APP_VERSION;
+  $('#verBtn').onclick = () => ask(`Live Looper & Scene Mixer\nVersión ${APP_VERSION} (${APP_DATE})\n\nCambios recientes:\n` + CHANGELOG.map(c => `• ${c[0]}: ${c[1]}`).join('\n'), 'Cerrar');
   $('#projName').oninput = e => { P().projectName = e.target.value || 'Sin nombre'; $('#setName').textContent = P().projectName; scheduleSave(); };
   $('#tpPrev').onclick = () => nav(-1, true);
   $('#tpNext').onclick = () => nav(1, true);
