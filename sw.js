@@ -1,5 +1,5 @@
 // Service Worker: guarda la app en caché para funcionar 100% sin conexión.
-const CACHE = 'live-looper-v4';
+const CACHE = 'live-looper-v5';
 const FILES = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
