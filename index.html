@@ -265,6 +265,12 @@ input[type=range]{height:40px}
 .tdot{width:12px;height:12px;border-radius:50%;background:#22e07a;box-shadow:0 0 10px #22e07a;flex:none;animation:pulse 1.2s infinite}
 @keyframes pulse{50%{opacity:.3}}
 #tpTxt{font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tright{display:flex;flex-direction:column;gap:6px;flex:none}
+.tnav{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.btn.tnavb{min-height:46px;padding:0 10px;font-size:18px;font-weight:800;border-radius:12px;background:#0e3563;border:2px solid #4aa3ff;color:#fff}
+.btn.tnavb.nx{background:#0f2a1b;border-color:#22e07a;color:#bff5d6}
+.btn.tnavb:disabled{opacity:.3}
+.transport.pv .tnav{display:none}
 .btn.tstop{min-height:52px;padding:0 20px;font-size:17px;font-weight:800;background:#e0242f;border:2px solid #ff7a7f;color:#fff;border-radius:12px;flex:none}
 .hint{color:var(--mute);font-size:14px;margin:-4px 0 12px}
 .guide{border:2px solid var(--acc2);background:#0e2440;border-radius:14px;padding:12px 14px;margin-bottom:14px;font-size:15px}
@@ -327,7 +333,13 @@ input[type=range]{height:40px}
   </nav>
   <div id="transport" class="transport" hidden>
     <span class="tdot"></span><span id="tpTxt" class="grow"></span>
-    <button class="btn tstop" id="tpStop">■ Detener</button>
+    <div class="tright">
+      <button class="btn tstop" id="tpStop">■ Detener</button>
+      <div class="tnav">
+        <button class="btn tnavb" id="tpPrev" aria-label="Escena anterior" title="Escena anterior">◀</button>
+        <button class="btn tnavb nx" id="tpNext" aria-label="Escena siguiente" title="Escena siguiente">▶</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1011,7 +1023,11 @@ const UI = {
   },
   transport() {
     const t = $('#transport'), sc = P().scenes.find(s => s.sceneId === Engine.currentId), pv = S.previewId && getAsset(S.previewId);
-    if (sc) { t.hidden = false; t.classList.remove('pv'); $('#tpTxt').textContent = 'Sonando: ' + sc.name; }
+    if (sc) {
+      t.hidden = false; t.classList.remove('pv'); $('#tpTxt').textContent = 'Sonando: ' + sc.name;
+      const i = P().scenes.indexOf(sc);
+      $('#tpPrev').disabled = i <= 0; $('#tpNext').disabled = i >= P().scenes.length - 1;
+    }
     else if (pv) { t.hidden = false; t.classList.add('pv'); $('#tpTxt').textContent = 'Escuchando: ' + pv.displayName; }
     else t.hidden = true;
   },
@@ -1149,6 +1165,8 @@ function bind() {
   };
   $('#setChip').onclick = () => setTab('project');
   $('#projName').oninput = e => { P().projectName = e.target.value || 'Sin nombre'; $('#setName').textContent = P().projectName; scheduleSave(); };
+  $('#tpPrev').onclick = () => nav(-1, true);
+  $('#tpNext').onclick = () => nav(1, true);
   $('#tpStop').onclick = () => { Engine.stopPreview(); Engine.stopAll(0.5); UI.bank(); UI.mixAdd(); UI.transport(); };
   $('#guideClose').onclick = () => { $('#guide').hidden = true; lsSet('live-looper-guide', 1); };
   $('#btnGuide').onclick = () => { $('#guide').hidden = false; setTab('bank'); };
