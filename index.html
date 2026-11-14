@@ -266,6 +266,11 @@ input[type=range]{height:40px}
 .tdot{width:12px;height:12px;border-radius:50%;background:#22e07a;box-shadow:0 0 10px #22e07a;flex:none;animation:pulse 1.2s infinite}
 @keyframes pulse{50%{opacity:.3}}
 #tpTxt{font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tinfo{min-width:0;display:flex;flex-direction:column;gap:3px}
+.ttime{font-size:13px;color:#bff5d6;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tbar{height:8px;border-radius:999px;background:rgba(0,0,0,.35);overflow:hidden}
+#tpFill{height:100%;width:0;background:linear-gradient(90deg,#4aa3ff,#22e07a)}
+.transport.pv .ttime,.transport.pv .tbar{display:none}
 .tright{display:flex;flex-direction:column;gap:6px;flex:none}
 .tnav{display:grid;grid-template-columns:1fr 1fr;gap:6px}
 .btn.tnavb{min-height:46px;padding:0 10px;font-size:18px;font-weight:800;border-radius:12px;background:#0e3563;border:2px solid #4aa3ff;color:#fff}
@@ -334,7 +339,8 @@ input[type=range]{height:40px}
     <button data-tab="mix"><b>4</b>Mezcla</button>
   </nav>
   <div id="transport" class="transport" hidden>
-    <span class="tdot"></span><span id="tpTxt" class="grow"></span>
+    <span class="tdot"></span>
+    <div class="tinfo grow"><span id="tpTxt"></span><span id="tpTime" class="ttime"></span><div class="tbar"><div id="tpFill"></div></div></div>
     <div class="tright">
       <button class="btn tstop" id="tpStop">■ Detener</button>
       <div class="tnav">
@@ -512,9 +518,10 @@ input[type=range]{height:40px}
 'use strict';
 /* ===================== Versión ===================== */
 // IMPORTANTE: subir APP_VERSION y agregar una línea a CHANGELOG en CADA cambio de la app.
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const APP_DATE = '2026-11-14';
 const CHANGELOG = [
+  ['1.3.0', 'Barra de escena: tiempo en escena, ciclo y barra de progreso'],
   ['1.2.0', 'Botón de versión en la barra superior'],
   ['1.1.0', 'Botones escena anterior / siguiente bajo Detener (pantalla Escenas)'],
   ['1.0.0', 'Versión base: biblioteca, sets, escenas, mezcla y Modo En Vivo'],
@@ -680,7 +687,7 @@ const Engine = {
     if (gs.quantizeSceneChanges && src.loop && a && a.category === 'DRUM_LOOP' && this.transportStart != null)
       offset = (((when - this.transportStart) % buf.duration) + buf.duration) % buf.duration; // fase alineada al transporte
     src.start(when, offset);
-    const v = { assetId: id, src, fade, vol, pan, f: null, dying: false, timer: null };
+    const v = { assetId: id, src, fade, vol, pan, f: null, dying: false, timer: null, t0: when, off: offset };
     src.onended = () => {
       if (this.voices.get(id) === v) this.voices.delete(id);
       this.dying.delete(v);
@@ -725,6 +732,7 @@ const Engine = {
         this.voices.set(id, v); this.fade(v, 1, t0, dur);
       }
     }
+    if (this.currentId !== sc.sceneId) this.sceneStart = t0;
     this.currentId = this.posId = sc.sceneId; this.stopped = false;
     this.xf = { start: t0, dur };
   },
@@ -756,7 +764,7 @@ const Engine = {
   },
   hardReset() {
     for (const v of [...this.voices.values(), ...this.dying]) { clearTimeout(v.timer); try { v.src.stop(); } catch {} }
-    this.voices.clear(); this.dying.clear(); this.currentId = this.posId = null; this.stopped = false; this.xf = null; this.transportStart = null;
+    this.voices.clear(); this.dying.clear(); this.currentId = this.posId = null; this.stopped = false; this.xf = null; this.transportStart = null; this.sceneStart = null;
     this.stopPreview();
   },
   preview(id) {
@@ -1039,6 +1047,7 @@ const UI = {
       t.hidden = false; t.classList.remove('pv'); $('#tpTxt').textContent = 'Sonando: ' + sc.name;
       const i = P().scenes.indexOf(sc);
       $('#tpPrev').disabled = i <= 0; $('#tpNext').disabled = i >= P().scenes.length - 1;
+      tickTransport();
     }
     else if (pv) { t.hidden = false; t.classList.add('pv'); $('#tpTxt').textContent = 'Escuchando: ' + pv.displayName; }
     else t.hidden = true;
@@ -1144,6 +1153,28 @@ const UI = {
   afterNav() { this.scenes(); this.mix(); this.transport(); if (S.stageOpen) this.stage(); },
 };
 
+/* ---------- Reloj de la barra de escena ---------- */
+const fmtClock = s => { s = Math.max(0, Math.floor(+s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+// Progreso = posición dentro del sonido audible más largo de la escena (su ciclo, o su final si no repite).
+function tickTransport() {
+  const t = $('#transport'); if (t.hidden || t.classList.contains('pv') || !Engine.ctx) return;
+  const sc = P().scenes.find(s => s.sceneId === Engine.currentId); if (!sc) return;
+  const now = Engine.ctx.currentTime, el = Engine.sceneStart != null ? Math.max(0, now - Engine.sceneStart) : 0;
+  let best = null;
+  for (const tr of sc.tracks) {
+    const v = Engine.voices.get(tr.assetId), buf = S.buffers.get(tr.assetId);
+    if (!v || !buf || trackGain(sc, tr) === 0) continue;
+    if (!best || buf.duration > best.dur) best = { v, dur: buf.duration, loop: tr.loop !== false };
+  }
+  let txt = `⏱ ${fmtClock(el)} en escena`, pct = 0;
+  if (best) {
+    const run = Math.max(0, now - best.v.t0 + best.v.off), pos = best.loop ? run % best.dur : Math.min(run, best.dur);
+    pct = pos / best.dur * 100;
+    txt += ` · ${best.loop ? 'ciclo: ' : ''}quedan ${fmtClock(best.dur - pos)} de ${fmtClock(best.dur)}`;
+  }
+  $('#tpTime').textContent = txt; $('#tpFill').style.width = pct.toFixed(1) + '%';
+}
+
 /* ---------- Edición ---------- */
 function liveApply(dur) {
   const sc = selScene();
@@ -1175,6 +1206,7 @@ function bind() {
     if (ok) { $('#startOverlay').hidden = true; UI.all(); }
     else $('#startMsg').textContent = 'El navegador no habilitó el audio. Toca de nuevo.';
   };
+  setInterval(tickTransport, 250);
   $('#setChip').onclick = () => setTab('project');
   $('#verBtn').textContent = 'v' + APP_VERSION;
   $('#verBtn').onclick = () => ask(`Live Looper & Scene Mixer\nVersión ${APP_VERSION} (${APP_DATE})\n\nCambios recientes:\n` + CHANGELOG.map(c => `• ${c[0]}: ${c[1]}`).join('\n'), 'Cerrar');
