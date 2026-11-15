@@ -185,6 +185,7 @@ kbd{background:#232a33;border:1px solid #39424e;border-bottom-width:2px;border-r
 #checkList li.ok b{color:var(--acc)}#checkList li.warn b{color:var(--warn)}#checkList li.bad b{color:var(--bad)}
 #checkList li small{display:block;color:var(--mute);font-size:12.5px}
 .pedal{border:2px dashed #39424e;border-radius:12px;padding:14px;text-align:center;color:var(--mute);font-size:14px}
+.pedal.warn{border-style:solid;border-color:var(--warn);color:#ffe2a3;background:#2a1f05}
 .pedal.ok{border-style:solid;border-color:var(--acc);color:#bff5d6;background:#0f2a1b}
 .check-card .row{justify-content:flex-end;margin-top:14px}.check-card .btn{width:auto;min-height:48px;font-size:16px}
 /* ===== Botones grandes y colores vivos ===== */
@@ -263,6 +264,11 @@ input[type=range]{height:40px}
 .transport[hidden]{display:none}
 .prep{margin:8px 12px 0;padding:10px 14px;border-radius:14px;border:2px solid #ffb020;background:#2a1f05;color:#ffe2a3;font-size:15px}
 .prep[hidden]{display:none}
+.pedalbox{border:2px dashed #39424e;border-radius:12px;padding:12px;margin:8px 0;text-align:center;font-size:15px}
+.pedalbox.got{border-style:solid;border-color:#22e07a;background:#0f2a1b;color:#bff5d6}
+.pedalbox.unk{border-style:solid;border-color:#ffb020;background:#2a1f05;color:#ffe2a3}
+.pedalbox.learn{border-style:solid;border-color:#4aa3ff;background:#0e2440;color:#fff}
+.pedalbox b{font-size:18px}
 .prep b{color:#fff}
 .prep.ok{border-color:#22e07a;background:#05391e;color:#bff5d6}
 .prep.bad{border-color:#ff7a7f;background:#3a1416;color:#ffd0d2}
@@ -458,7 +464,15 @@ input[type=range]{height:40px}
     </details>
     <details class="fold">
       <summary>🦶 Pedal y teclado</summary>
-      <p class="note" style="margin-top:0"><kbd>PageDown</kbd> siguiente escena · <kbd>PageUp</kbd> anterior. En Modo En Vivo también <kbd>→</kbd> <kbd>←</kbd>, y <kbd>Espacio</kbd> detiene todo con un fundido de 0.5 s. Los pedales Bluetooth pasa-páginas envían PageDown/PageUp.</p>
+      <p class="note" style="margin-top:0">Teclas reconocidas: <b>Siguiente</b> = <kbd>PageDown</kbd> <kbd>↓</kbd> <kbd>→</kbd> o «pista siguiente» · <b>Anterior</b> = <kbd>PageUp</kbd> <kbd>↑</kbd> <kbd>←</kbd> o «pista anterior». En Modo En Vivo, <kbd>Espacio</kbd> detiene todo con un fundido de 0.5 s.</p>
+      <div class="pedalbox" id="pedalDiag">Pisa el pedal aquí para ver qué tecla envía</div>
+      <div class="row">
+        <button class="btn sm" id="learnNext">Asignar pedal a ▶ Siguiente</button>
+        <button class="btn sm" id="learnPrev">Asignar pedal a ◀ Anterior</button>
+        <button class="btn sm ghost" id="learnReset">Restablecer</button>
+      </div>
+      <p class="note" id="pedalMap"></p>
+      <p class="note">Si al pisar el pedal aquí no aparece nada, el celular no le está entregando teclas a la página: revisa que esté emparejado por Bluetooth y prueba otro modo del pedal (muchos cambian de modo manteniendo un botón o una combinación; ver su manual). Las teclas de volumen no se pueden usar desde una página web.</p>
     </details>
     <div class="row"><button class="btn sm ghost" id="btnGuide">❓ Cómo se usa</button><span class="savestate" id="saveState"></span></div>
   </section>
@@ -507,7 +521,7 @@ input[type=range]{height:40px}
   <div class="card check-card">
     <h1>Chequeo antes del show</h1>
     <ul id="checkList"></ul>
-    <div class="pedal" id="pedalTest">Pisa el pedal (PageDown / PageUp) para probarlo · opcional</div>
+    <div class="pedal" id="pedalTest">Pisa el pedal para probarlo · opcional</div>
     <div class="row"><button class="btn ghost" id="checkBack">Volver</button><button class="btn primary" id="checkGo">Entrar al escenario</button></div>
   </div>
 </div>
@@ -531,9 +545,10 @@ input[type=range]{height:40px}
 'use strict';
 /* ===================== Versión ===================== */
 // IMPORTANTE: subir APP_VERSION y agregar una línea a CHANGELOG en CADA cambio de la app.
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.8.0';
 const APP_DATE = '2026-11-14';
 const CHANGELOG = [
+  ['1.8.0', 'Pedal: más teclas reconocidas (flechas, multimedia), prueba de pedal y asignación manual de teclas'],
   ['1.7.0', 'Aviso con barra de avance mientras se prepara el set, y confirmación «Listo para tocar»'],
   ['1.6.1', 'Carga masiva sin saturar la memoria: se revisa cada archivo sin decodificarlo y se libera al instante'],
   ['1.6.0', 'Nueva opción por escena: detenerse al terminar (sin avanzar)'],
@@ -1287,6 +1302,10 @@ function bind() {
   };
   setInterval(tickTransport, 250);
   $('#setChip').onclick = () => setTab('project');
+  $('#learnNext').onclick = () => startLearn('next');
+  $('#learnPrev').onclick = () => startLearn('prev');
+  $('#learnReset').onclick = () => { PEDAL.learn = null; PEDAL.map = { next: null, prev: null }; lsSet('live-looper-pedal', PEDAL.map); renderPedalMap(); $('#pedalDiag').className = 'pedalbox'; $('#pedalDiag').textContent = 'Pisa el pedal aquí para ver qué tecla envía'; };
+  renderPedalMap();
   $('#verBtn').textContent = 'v' + APP_VERSION;
   $('#verBtn').onclick = () => ask(`Live Looper & Scene Mixer\nVersión ${APP_VERSION} (${APP_DATE})\n\nCambios recientes:\n` + CHANGELOG.map(c => `• ${c[0]}: ${c[1]}`).join('\n'), 'Cerrar');
   $('#projName').oninput = e => { P().projectName = e.target.value || 'Sin nombre'; $('#setName').textContent = P().projectName; scheduleSave(); };
@@ -1427,6 +1446,52 @@ function bind() {
   });
 }
 
+/* ---------- Pedal ---------- */
+const PEDAL_DEFAULT = {
+  next: ['PageDown', 'ArrowDown', 'ArrowRight', 'MediaTrackNext', 'AudioTrackNext', 'MediaFastForward'],
+  prev: ['PageUp', 'ArrowUp', 'ArrowLeft', 'MediaTrackPrevious', 'AudioTrackPrevious', 'MediaRewind'],
+};
+const keyName = e => (e.key && e.key !== 'Unidentified' ? e.key : '') || e.code || ('código ' + e.keyCode);
+const PEDAL = {
+  learn: null,
+  map: lsGet('live-looper-pedal', { next: null, prev: null }),
+  custom(e) { const n = keyName(e); return n === this.map.next || n === this.map.prev; },
+};
+function pedalAction(e) {
+  const n = keyName(e);
+  if (PEDAL.map.next && n === PEDAL.map.next) return 'next';
+  if (PEDAL.map.prev && n === PEDAL.map.prev) return 'prev';
+  if (PEDAL_DEFAULT.next.includes(e.key) || PEDAL_DEFAULT.next.includes(e.code)) return 'next';
+  if (PEDAL_DEFAULT.prev.includes(e.key) || PEDAL_DEFAULT.prev.includes(e.code)) return 'prev';
+  return null;
+}
+const KEY_ES = { ArrowDown: '↓ flecha abajo', ArrowUp: '↑ flecha arriba', ArrowRight: '→ flecha derecha', ArrowLeft: '← flecha izquierda', ' ': 'Espacio', Enter: 'Enter', MediaTrackNext: 'pista siguiente', MediaTrackPrevious: 'pista anterior', MediaPlayPause: 'play/pausa' };
+const keyLabel = n => KEY_ES[n] || n;
+function showPedalDiag(e, act) {
+  const box = $('#pedalDiag'); if (!box) return;
+  const n = keyName(e);
+  box.className = 'pedalbox ' + (act ? 'got' : 'unk');
+  box.innerHTML = act ? `✓ Recibido: <b>${esc(keyLabel(n))}</b> → ${act === 'next' ? '▶ Siguiente' : '◀ Anterior'}`
+    : `Recibido: <b>${esc(keyLabel(n))}</b> · no está asignada. Usa «Asignar pedal a…» para usarla.`;
+}
+function renderPedalMap() {
+  const m = PEDAL.map, el = $('#pedalMap'); if (!el) return;
+  el.textContent = (m.next || m.prev) ? `Asignación propia: Siguiente = ${m.next ? keyLabel(m.next) : '(estándar)'} · Anterior = ${m.prev ? keyLabel(m.prev) : '(estándar)'}` : 'Usando las teclas estándar.';
+}
+function startLearn(which) {
+  PEDAL.learn = which; const box = $('#pedalDiag');
+  box.className = 'pedalbox learn'; box.innerHTML = `Pisa ahora el botón del pedal que quieres para <b>${which === 'next' ? '▶ Siguiente' : '◀ Anterior'}</b>…`;
+  document.activeElement && document.activeElement.blur && document.activeElement.blur();
+}
+function setPedalKey(which, n) {
+  PEDAL.learn = null;
+  const other = which === 'next' ? 'prev' : 'next';
+  if (PEDAL.map[other] === n) PEDAL.map[other] = null;
+  PEDAL.map[which] = n; lsSet('live-looper-pedal', PEDAL.map); renderPedalMap();
+  const box = $('#pedalDiag'); box.className = 'pedalbox got';
+  box.innerHTML = `✓ <b>${esc(keyLabel(n))}</b> asignada a ${which === 'next' ? '▶ Siguiente' : '◀ Anterior'}`; vib(40);
+}
+
 /* ---------- Modo En Vivo ---------- */
 let wakeLock = null, rafId = 0, lastNav = 0, meterBuf = null, chipsT = 0, chipsKey = '';
 const vib = ms => { try { navigator.vibrate && navigator.vibrate(ms); } catch {} };
@@ -1473,8 +1538,12 @@ function renderCheck() {
   const mv = P().globalSettings.masterVolume;
   add(mv >= 0.5 ? 'ok' : 'warn', `Volumen maestro: ${Math.round(mv * 100)}%`, 'Revisa también el volumen del celular y la conexión al equipo de sonido');
   $('#checkList').innerHTML = items.join('');
-  const pd = $('#pedalTest'); pd.classList.toggle('ok', !!CHK.pedal);
-  pd.textContent = CHK.pedal ? `✓ Pedal funcionando (recibido: ${CHK.pedal})` : 'Pisa el pedal (PageDown / PageUp) para probarlo · opcional';
+  const pd = $('#pedalTest'); pd.classList.toggle('ok', !!CHK.pedal && !!CHK.pedal.act);
+  const cp = CHK.pedal;
+  pd.classList.toggle('warn', !!cp && !cp.act);
+  pd.textContent = !cp ? 'Pisa el pedal para probarlo · opcional'
+    : cp.act ? `✓ Pedal funcionando: ${keyLabel(cp.key)} → ${cp.act === 'next' ? 'Siguiente' : cp.act === 'prev' ? 'Anterior' : 'Detener'}`
+    : `⚠ Se recibió «${keyLabel(cp.key)}», pero no está asignada. Asígnala en Sets → Pedal y teclado.`;
   $('#checkGo').disabled = !isReady();
 }
 function closeCheck() { S.checkOpen = false; $('#check').hidden = true; }
@@ -1583,18 +1652,24 @@ function bindStage() {
   // Teclado / pedal
   document.addEventListener('keydown', e => {
     const k = e.key, tag = (e.target.tagName || '').toLowerCase();
+    if (['Shift', 'Control', 'Alt', 'Meta', 'Unidentified'].includes(k) && !e.code) return;
     const typing = (tag === 'input' && !['range', 'checkbox'].includes(e.target.type)) || tag === 'textarea';
     const live = S.stageOpen || S.checkOpen;
-    const isNext = k === 'PageDown' || (live && k === 'ArrowRight');
-    const isPrev = k === 'PageUp' || (live && k === 'ArrowLeft');
+    const act = pedalAction(e);
+    // Aprender una tecla para el pedal
+    if (PEDAL.learn) { e.preventDefault(); setPedalKey(PEDAL.learn, keyName(e)); return; }
+    showPedalDiag(e, act);
     if (S.checkOpen) {
-      if (isNext || isPrev || k === ' ') { e.preventDefault(); CHK.pedal = k === ' ' ? 'Espacio' : k; vib(20); renderCheck(); }
+      e.preventDefault(); CHK.pedal = { key: keyName(e), act: act || (k === ' ' ? 'stop' : null) }; vib(20); renderCheck();
       return;
     }
-    if (isNext || isPrev) {
+    if (act === 'next' || act === 'prev') {
       if (typing && !S.stageOpen) return;
+      // Las flechas solo mueven escenas en vivo o cuando hay algo sonando/detenido; si no, sirven para desplazarse.
+      if (!live && !PEDAL.custom(e) && /^Arrow/.test(k) && Engine.posId == null) return;
+      if (!live && /^Arrow/.test(k) && (tag === 'select' || (tag === 'input' && e.target.type === 'range'))) return;
       e.preventDefault(); if (e.repeat) return;
-      nav(isNext ? 1 : -1);
+      nav(act === 'next' ? 1 : -1);
     } else if (S.stageOpen && (k === ' ' || k === 'Spacebar')) { e.preventDefault(); if (!e.repeat) Engine.stopAll(0.5); }
     else if (S.stageOpen && k === 'Escape' && !$('#stList').hidden) $('#stList').hidden = true;
   });
