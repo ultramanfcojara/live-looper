@@ -261,6 +261,14 @@ input[type=range]{height:40px}
 .tabs button.on b{background:#22e07a;color:#002a12}
 .transport{display:flex;align-items:center;gap:10px;margin:8px 12px 0;padding:6px 6px 6px 14px;border-radius:14px;background:#05391e;border:2px solid #22e07a}
 .transport[hidden]{display:none}
+.prep{margin:8px 12px 0;padding:10px 14px;border-radius:14px;border:2px solid #ffb020;background:#2a1f05;color:#ffe2a3;font-size:15px}
+.prep[hidden]{display:none}
+.prep b{color:#fff}
+.prep.ok{border-color:#22e07a;background:#05391e;color:#bff5d6}
+.prep.bad{border-color:#ff7a7f;background:#3a1416;color:#ffd0d2}
+.pbar{height:8px;border-radius:999px;background:rgba(0,0,0,.35);overflow:hidden;margin-top:8px}
+#prepFill{height:100%;width:0;background:#ffb020;transition:width .3s}
+.prep.ok .pbar,.prep.bad .pbar{display:none}
 .transport.pv{background:#0e3563;border-color:#4aa3ff}
 .transport.pv .tdot{background:#4aa3ff;box-shadow:0 0 10px #4aa3ff}
 .tdot{width:12px;height:12px;border-radius:50%;background:#22e07a;box-shadow:0 0 10px #22e07a;flex:none;animation:pulse 1.2s infinite}
@@ -341,6 +349,7 @@ input[type=range]{height:40px}
     <button data-tab="scenes"><b>3</b>Escenas</button>
     <button data-tab="mix"><b>4</b>Mezcla</button>
   </nav>
+  <div id="prep" class="prep" role="status" hidden><div id="prepTxt"></div><div class="pbar"><div id="prepFill"></div></div></div>
   <div id="transport" class="transport" hidden>
     <span class="tdot"></span>
     <div class="tinfo grow"><span id="tpTxt"></span><span id="tpTrack" class="ttrack"></span><span id="tpTime" class="ttime"></span><div class="tbar"><div id="tpFill"></div></div></div>
@@ -522,9 +531,10 @@ input[type=range]{height:40px}
 'use strict';
 /* ===================== Versión ===================== */
 // IMPORTANTE: subir APP_VERSION y agregar una línea a CHANGELOG en CADA cambio de la app.
-const APP_VERSION = '1.6.1';
+const APP_VERSION = '1.7.0';
 const APP_DATE = '2026-11-14';
 const CHANGELOG = [
+  ['1.7.0', 'Aviso con barra de avance mientras se prepara el set, y confirmación «Listo para tocar»'],
   ['1.6.1', 'Carga masiva sin saturar la memoria: se revisa cada archivo sin decodificarlo y se libera al instante'],
   ['1.6.0', 'Nueva opción por escena: detenerse al terminar (sin avanzar)'],
   ['1.5.0', 'Barra de escena: muestra el nombre de la pista (o Multitrack) bajo el nombre de la escena'],
@@ -833,9 +843,30 @@ function ensureDecoded(id) {
   return pr;
 }
 // Carga en RAM los sonidos que usa el set abierto y libera los demás.
+// Aviso visible mientras se preparan los sonidos del set (al abrir la app, al cambiar de set, etc.).
+let prepHideT;
+function showPrep(kind, html, pct) {
+  const el = $('#prep'); clearTimeout(prepHideT);
+  if (!kind) { el.hidden = true; return; }
+  el.hidden = false; el.className = 'prep' + (kind === 'busy' ? '' : ' ' + kind);
+  $('#prepTxt').innerHTML = html; if (pct != null) $('#prepFill').style.width = pct + '%';
+  if (kind !== 'busy') prepHideT = setTimeout(() => { el.hidden = true; }, kind === 'ok' ? 4000 : 9000);
+  document.documentElement.style.setProperty('--hh', $('header').offsetHeight + 'px');
+}
 async function prepareSet() {
   const ids = [...usedIds()].filter(id => !S.buffers.has(id) && getAsset(id));
-  for (const id of ids) { await ensureDecoded(id); UI.status(); }
+  const total = ids.length; let done = 0;
+  const msg = () => `⏳ <b>Preparando el set para tocar: ${done} de ${total} sonido(s)…</b><br>Espera el aviso «Listo para tocar» antes de lanzar escenas.`;
+  if (total) showPrep('busy', msg(), 0);
+  const startTxt = () => { if (!$('#startOverlay').hidden) $('#startMsg').textContent = `Preparando el set: ${done} de ${total} sonido(s)… Puedes iniciar el motor mientras tanto.`; };
+  if (total) startTxt();
+  for (const id of ids) { await ensureDecoded(id); done++; if (total) { showPrep('busy', msg(), Math.round(done / total * 100)); startTxt(); } UI.status(); }
+  if (total) {
+    const loaded = [...usedIds()].every(id => S.buffers.has(id));
+    if (loaded && !Engine.running()) { showPrep(null); $('#startMsg').textContent = `✓ Los ${usedIds().size} sonido(s) del set están listos. Toca el botón para empezar.`; }
+    else if (isReady()) showPrep('ok', `✓ <b>Listo para tocar</b> · ${usedIds().size} sonido(s) en memoria (${(Engine.ramBytes() / 1048576).toFixed(0)} MB)`);
+    else showPrep('bad', '⚠ <b>El set no está listo:</b> ' + esc(readyReason() || 'revisa los sonidos en la pestaña Sonidos'));
+  }
   const used = usedIds();
   for (const id of [...S.buffers.keys()]) if (!used.has(id) && id !== S.previewId && !Engine.voices.has(id)) S.buffers.delete(id);
   UI.all();
@@ -1251,7 +1282,7 @@ function bind() {
   document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => setTab(b.dataset.tab));
   $('#btnStart').onclick = async () => {
     const ok = await Engine.start();
-    if (ok) { $('#startOverlay').hidden = true; UI.all(); }
+    if (ok) { $('#startOverlay').hidden = true; UI.all(); if (!S.loading.size && isReady()) showPrep('ok', `✓ <b>Listo para tocar</b> · ${usedIds().size} sonido(s) en memoria (${(Engine.ramBytes() / 1048576).toFixed(0)} MB)`); }
     else $('#startMsg').textContent = 'El navegador no habilitó el audio. Toca de nuevo.';
   };
   setInterval(tickTransport, 250);
