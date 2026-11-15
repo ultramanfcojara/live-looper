@@ -374,7 +374,7 @@ input[type=range]{height:40px}
       <label class="field">Nombre<input type="text" id="mixName"></label>
       <label class="field">Crossfade de entrada (s)<input type="number" id="mixXf" min="0.1" max="10" step="0.1" placeholder="Por defecto"></label>
     </div>
-    <label class="field">Al terminar la escena<select id="mixEnd" class="txt"><option value="next">▶ Pasar sola a la siguiente escena</option><option value="loop">⟲ Repetir hasta que yo avance (pedal / botón)</option></select></label>
+    <label class="field">Al terminar la escena<select id="mixEnd" class="txt"><option value="next">▶ Pasar sola a la siguiente escena</option><option value="loop">⟲ Repetir hasta que yo avance (pedal / botón)</option><option value="stop">■ Detenerse al terminar (no avanza)</option></select></label>
     <label class="field">Nota para el escenario (se ve en grande en vivo)<input type="text" id="mixNote" maxlength="140" placeholder="Ej: Capo 2 · entra voz en el compás 8"></label>
     <div class="row" style="margin-bottom:6px">
       <button class="btn primary" id="btnAudition">▶ Escuchar esta escena</button>
@@ -522,9 +522,10 @@ input[type=range]{height:40px}
 'use strict';
 /* ===================== Versión ===================== */
 // IMPORTANTE: subir APP_VERSION y agregar una línea a CHANGELOG en CADA cambio de la app.
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.6.0';
 const APP_DATE = '2026-11-14';
 const CHANGELOG = [
+  ['1.6.0', 'Nueva opción por escena: detenerse al terminar (sin avanzar)'],
   ['1.5.0', 'Barra de escena: muestra el nombre de la pista (o Multitrack) bajo el nombre de la escena'],
   ['1.4.0', 'Avance automático a la siguiente escena al terminar (o repetir, por escena) · tiempo compacto'],
   ['1.3.0', 'Barra de escena: tiempo en escena, ciclo y barra de progreso'],
@@ -739,7 +740,7 @@ const Engine = {
       }
     }
     if (this.currentId !== sc.sceneId) this.sceneStart = t0;
-    this.currentId = this.posId = sc.sceneId; this.stopped = false;
+    this.currentId = this.posId = sc.sceneId; this.stopped = false; this.ended = false;
     this.xf = { start: t0, dur };
   },
   goTo(idx) {
@@ -752,7 +753,7 @@ const Engine = {
     if (!isReady()) return toast(readyReason());
     const i = posIndex(), n = P().scenes.length;
     if (i < 0) return this.goTo(0);
-    if (this.stopped) return this.goTo(i);
+    if (this.stopped) return this.goTo(this.ended && i < n - 1 ? i + 1 : i); // terminó sola -> sigue; pánico -> reanuda
     if (i < n - 1) this.goTo(i + 1); else toast('Última escena del setlist');
   },
   prev() {
@@ -762,6 +763,7 @@ const Engine = {
     if (i > 0) this.goTo(i - 1); else if (this.stopped) this.goTo(0); else toast('Primera escena del setlist');
   },
   stopAll(dur = 0.5) {
+    this.ended = false;
     if (!this.ctx) return;
     const t0 = this.ctx.currentTime + 0.005;
     for (const v of this.voices.values()) this.kill(v, t0, dur);
@@ -935,7 +937,7 @@ function normalize(m) {
   m.globalSettings = { ...DEFAULT_SETTINGS, ...(m.globalSettings || {}) };
   m.audioPool = (m.audioPool || []).filter(a => a && a.assetId).map(normAsset);
   m.scenes = (m.scenes || []).slice().sort((a, b) => (a.orderIndex ?? 0) - (b.orderIndex ?? 0)).map(s => ({
-    sceneId: s.sceneId || uid('scn'), orderIndex: 0, name: s.name || 'Escena', crossfadeDurationOverride: s.crossfadeDurationOverride ?? null, notes: s.notes || '', onEnd: s.onEnd === 'loop' ? 'loop' : 'next',
+    sceneId: s.sceneId || uid('scn'), orderIndex: 0, name: s.name || 'Escena', crossfadeDurationOverride: s.crossfadeDurationOverride ?? null, notes: s.notes || '', onEnd: ['loop', 'stop'].includes(s.onEnd) ? s.onEnd : 'next',
     tracks: (s.tracks || []).filter(t => t && t.assetId).map(t => ({ assetId: t.assetId, volume: t.volume ?? 0.8, pan: t.pan ?? 0, loop: t.loop !== false, mute: !!t.mute, solo: !!t.solo })),
   }));
   if (!m.scenes.length) m.scenes.push(newScene('01 - Escena'));
@@ -1082,7 +1084,7 @@ const UI = {
       const playing = s.sceneId === Engine.currentId;
       return `<li class="scene ${i === S.selected ? 'sel' : ''} ${playing ? 'live' : ''}" data-i="${i}" draggable="true">
       <span class="handle" aria-hidden="true">⋮⋮</span>
-      <button class="sname" data-act="select"><span class="num">${i + 1}</span>${esc(s.name)}<small>${playing ? '● sonando · ' : ''}${s.tracks.length} sonido(s) · crossfade ${xfOf(s).toFixed(1)} s · ${s.onEnd === 'loop' ? '⟲ repite' : '▶ avanza sola'}</small></button>
+      <button class="sname" data-act="select"><span class="num">${i + 1}</span>${esc(s.name)}<small>${playing ? '● sonando · ' : ''}${s.tracks.length} sonido(s) · crossfade ${xfOf(s).toFixed(1)} s · ${s.onEnd === 'loop' ? '⟲ repite' : s.onEnd === 'stop' ? '■ se detiene' : '▶ avanza sola'}</small></button>
       ${playing ? '<button class="btn playbtn danger" data-act="stop" aria-label="Detener">■</button>' : '<button class="btn playbtn" data-act="play" aria-label="Escuchar">▶</button>'}
       <div class="sbtns">
         <button class="btn icon ghost" data-act="up" ${i ? '' : 'disabled'} aria-label="Subir">↑</button>
@@ -1098,7 +1100,7 @@ const UI = {
     $('#mixName').value = sc.name;
     $('#mixXf').value = sc.crossfadeDurationOverride ?? '';
     $('#mixNote').value = sc.notes || '';
-    $('#mixEnd').value = sc.onEnd === 'loop' ? 'loop' : 'next';
+    $('#mixEnd').value = sc.onEnd || 'next';
     $('#mixXf').placeholder = `Por defecto (${P().globalSettings.defaultCrossfadeSeconds} s)`;
     $('#mixLive').textContent = sc.sceneId === Engine.currentId ? '● Sonando: los cambios se oyen en vivo' : '';
     const row = t => {
@@ -1143,15 +1145,15 @@ const UI = {
   stage() {
     const sc = P().scenes, i = posIndex(), cur = sc[i], stopped = Engine.stopped && i >= 0;
     const box = $('#stCurBox'); box.classList.toggle('idle', i < 0); box.classList.toggle('stopped', stopped);
-    $('#stCurLabel').textContent = i < 0 ? 'Listo para empezar' : stopped ? '■ Detenido en' : '● Escena activa';
+    $('#stCurLabel').textContent = i < 0 ? 'Listo para empezar' : stopped ? (Engine.ended ? '■ Terminó' : '■ Detenido en') : '● Escena activa';
     $('#stCur').textContent = cur ? cur.name : 'En silencio';
     $('#stNote').textContent = cur && cur.notes ? cur.notes : '';
     $('#stCount').textContent = cur ? `Escena ${i + 1} de ${sc.length}` : `${sc.length} escena(s) en el setlist`;
-    const target = i < 0 ? sc[0] : stopped ? cur : sc[i + 1];
-    $('#stNextHead').textContent = i < 0 ? 'Primera escena' : stopped ? 'Reanudar' : 'Siguiente';
+    const fin = stopped && Engine.ended && sc[i + 1], target = i < 0 ? sc[0] : fin ? sc[i + 1] : stopped ? cur : sc[i + 1];
+    $('#stNextHead').textContent = i < 0 ? 'Primera escena' : fin ? 'Siguiente' : stopped ? 'Reanudar' : 'Siguiente';
     $('#stNext').textContent = target ? target.name : 'Fin del setlist';
-    $('#stNextLbl').textContent = i < 0 ? 'Empezar ' : stopped ? 'Reanudar ' : 'Siguiente ';
-    $('#stNextBtn').classList.toggle('resume', stopped);
+    $('#stNextLbl').textContent = i < 0 ? 'Empezar ' : fin ? 'Siguiente ' : stopped ? 'Reanudar ' : 'Siguiente ';
+    $('#stNextBtn').classList.toggle('resume', stopped && !fin);
     $('#stNextBtn').disabled = !target;
     $('#stPrev').disabled = i <= 0 && !stopped;
     $('#stInfo').textContent = P().projectName + (P().globalSettings.quantizeSceneChanges ? ` · ${P().globalSettings.bpm} BPM · cuantizado` : '');
@@ -1177,10 +1179,11 @@ function tickTransport() {
   // Avance automático: el crossfade arranca antes del final para que la transición termine justo al acabar la escena.
   if (len > 0 && !loop && Engine.autoFired !== Engine.sceneStart) {
     const i = P().scenes.indexOf(sc), nx = P().scenes[i + 1];
-    const lead = Math.min(nx ? xfOf(nx) : xfOf(sc), len / 2);
+    const lead = sc.onEnd === 'stop' ? Math.min(0.5, len / 2) : Math.min(nx ? xfOf(nx) : xfOf(sc), len / 2);
     if (el >= len - lead) {
       Engine.autoFired = Engine.sceneStart;
-      if (nx) Engine.next(); else { Engine.stopAll(lead); toast('Fin del setlist'); }
+      if (sc.onEnd === 'stop') { Engine.stopAll(Math.min(0.5, len / 2)); Engine.ended = true; UI.afterNav(); toast('Escena terminada · Siguiente para continuar'); }
+      else if (nx) Engine.next(); else { Engine.stopAll(lead); toast('Fin del setlist'); }
       return;
     }
   }
@@ -1193,7 +1196,7 @@ function tickTransport() {
     pct = pos / len * 100;
     txt = (loop ? '⟲ ' : '⏱ ') + `${fmtClock(pos)} / ${fmtClock(len)}`;
     const i = P().scenes.indexOf(sc), nx = P().scenes[i + 1];
-    txt += loop ? ' · repite' : nx ? ` · luego: ${nx.name}` : ' · última';
+    txt += loop ? ' · repite' : sc.onEnd === 'stop' ? ' · se detiene al final' : nx ? ` · luego: ${nx.name}` : ' · última';
   }
   $('#tpTime').textContent = txt; $('#tpFill').style.width = pct.toFixed(1) + '%';
 }
@@ -1450,7 +1453,7 @@ function tick() {
     const now = Engine.ctx.currentTime, p = (now - x.start) / x.dur;
     if (p < 0) { bar.style.width = '0%'; txt.textContent = `Esperando el compás… ${(x.start - now).toFixed(1)} s`; }
     else if (p < 1) { bar.style.width = (p * 100).toFixed(1) + '%'; txt.textContent = x.stop ? 'Deteniendo…' : `Crossfade ${(p * x.dur).toFixed(1)} / ${x.dur.toFixed(1)} s`; }
-    else { bar.style.width = x.stop ? '0%' : '100%'; txt.textContent = x.stop ? 'Detenido · Siguiente o PageDown para reanudar' : 'Transición completa'; }
+    else { bar.style.width = x.stop ? '0%' : '100%'; txt.textContent = x.stop ? (Engine.ended ? 'Escena terminada · Siguiente o PageDown para continuar' : 'Detenido · Siguiente o PageDown para reanudar') : 'Transición completa'; }
   } else { bar.style.width = '0%'; txt.textContent = 'Toca Empezar o pisa el pedal para comenzar'; }
   const an = Engine.analyser;
   if (an) {
@@ -1474,7 +1477,7 @@ function tick() {
 }
 function renderSetlist() {
   const i = posIndex();
-  $('#slItems').innerHTML = P().scenes.map((s, k) => `<li data-i="${k}" class="${k === i ? 'cur' : ''}"><span class="fill"></span><span>${k + 1}. ${esc(s.name)}</span><small>${k === i ? (Engine.stopped ? '■ Detenida aquí' : '● Sonando ahora') : `${s.tracks.length} pista(s) · crossfade ${xfOf(s).toFixed(1)} s`}</small></li>`).join('');
+  $('#slItems').innerHTML = P().scenes.map((s, k) => `<li data-i="${k}" class="${k === i ? 'cur' : ''}"><span class="fill"></span><span>${k + 1}. ${esc(s.name)}</span><small>${k === i ? (Engine.stopped ? (Engine.ended ? '■ Terminó aquí' : '■ Detenida aquí') : '● Sonando ahora') : `${s.tracks.length} pista(s) · crossfade ${xfOf(s).toFixed(1)} s`}</small></li>`).join('');
 }
 // Mantener presionado: evita activaciones accidentales.
 function holdAction(el, ms, onDone, shortMsg) {
