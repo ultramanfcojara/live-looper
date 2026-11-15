@@ -337,6 +337,12 @@ input[type=range]{height:40px}
 .scene .sbtns{flex-basis:100%;justify-content:flex-end;gap:6px;padding-top:2px}
 #projName{flex:none}
 .multihint{margin:12px auto 0;max-width:420px;font-size:14px;color:#cfd6df;line-height:1.4}
+/* v1.9.1: en Mezcla el nombre de la pista ocupa su propia fila (completo, sin cortarse) */
+.mrow .mhead{grid-column:1/-1;align-items:flex-start;flex-wrap:wrap}
+.mrow .mname{white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere;font-size:16px;line-height:1.25;flex:1 1 0;min-width:0}
+.mrow .mhead .sw{margin-top:4px;flex:none}
+.mrow .mbtns{grid-column:1/-1;justify-content:flex-end}
+.addrow .mname{white-space:normal;overflow-wrap:anywhere}
 </style>
 </head>
 <body>
@@ -545,9 +551,10 @@ input[type=range]{height:40px}
 'use strict';
 /* ===================== Versión ===================== */
 // IMPORTANTE: subir APP_VERSION y agregar una línea a CHANGELOG en CADA cambio de la app.
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '1.9.1';
 const APP_DATE = '2026-11-14';
 const CHANGELOG = [
+  ['1.9.1', 'Mezcla: el nombre de cada pista va en su propia fila, completo y legible'],
   ['1.9.0', 'Pistas largas en streaming (MP3 comprimido, casi sin RAM) y protección de memoria'],
   ['1.8.0', 'Pedal: más teclas reconocidas (flechas, multimedia), prueba de pedal y asignación manual de teclas'],
   ['1.7.0', 'Aviso con barra de avance mientras se prepara el set, y confirmación «Listo para tocar»'],
