@@ -522,9 +522,10 @@ input[type=range]{height:40px}
 'use strict';
 /* ===================== Versión ===================== */
 // IMPORTANTE: subir APP_VERSION y agregar una línea a CHANGELOG en CADA cambio de la app.
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.6.1';
 const APP_DATE = '2026-11-14';
 const CHANGELOG = [
+  ['1.6.1', 'Carga masiva sin saturar la memoria: se revisa cada archivo sin decodificarlo y se libera al instante'],
   ['1.6.0', 'Nueva opción por escena: detenerse al terminar (sin avanzar)'],
   ['1.5.0', 'Barra de escena: muestra el nombre de la pista (o Multitrack) bajo el nombre de la escena'],
   ['1.4.0', 'Avance automático a la siguiente escena al terminar (o repetir, por escena) · tiempo compacto'],
@@ -856,6 +857,19 @@ async function addFiles(fileList) {
   try { await addFilesInner(fileList); }
   catch (e) { S.loading.clear(); UI.all(); toast('Error al cargar: ' + (e && e.message ? e.message : e)); }
 }
+// Revisa un audio sin decodificarlo (casi no usa RAM): devuelve su duración, o null si el navegador no lo pudo leer.
+function probeAudio(blob) {
+  return new Promise(res => {
+    let url; try { url = URL.createObjectURL(blob); } catch { return res(null); }
+    const au = new Audio(); let done = false, tm;
+    const fin = v => { if (done) return; done = true; clearTimeout(tm); au.onloadedmetadata = au.onerror = null; au.removeAttribute('src'); try { au.load(); } catch {} URL.revokeObjectURL(url); res(v); };
+    tm = setTimeout(() => fin(null), 8000);
+    au.preload = 'metadata';
+    au.onloadedmetadata = () => fin(isFinite(au.duration) && au.duration > 0 ? au.duration : null);
+    au.onerror = () => fin(null);
+    au.src = url;
+  });
+}
 async function addFilesInner(fileList) {
   // Algunos selectores de Android entregan archivos sin tipo ni extensión: se intenta decodificar todo.
   const files = [...fileList].filter(f => !/^(image|text)\//.test(f.type || '') && !/\.(json|txt|pdf|jpe?g|png|zip)$/i.test(f.name || ''));
@@ -869,8 +883,16 @@ async function addFilesInner(fileList) {
     if (a) relinked++;
     else if (S.library.some(x => x.fileName === fname && hasFile(x) && (!x.size || x.size === f.size))) { dup++; continue; }
     else { a = normAsset({ assetId: uid('ast'), fileName: fname, displayName: fname.replace(/\.[^.]+$/, ''), category: 'OTHER', size: f.size }); S.library.push(a); added++; }
-    a.size = f.size; S.blobs.set(a.assetId, f); UI.bank();
-    if (!(await ensureDecoded(a.assetId))) { bad++; UI.bank(); continue; }
+    a.size = f.size; S.blobs.set(a.assetId, f);
+    if (files.length > 1) toast(`Cargando ${n} de ${files.length}: ${fname}`);
+    // 1) Revisión liviana (sin decodificar). 2) Si el navegador no entrega datos, se prueba decodificando.
+    S.loading.add(a.assetId); S.errors.delete(a.assetId); UI.bank(); UI.status();
+    const dur = await probeAudio(f);
+    S.loading.delete(a.assetId);
+    if (dur) a.durationSeconds = +dur.toFixed(3);
+    else if (!(await ensureDecoded(a.assetId))) { bad++; UI.bank(); continue; }
+    // 3) Se libera de la RAM al instante si el set abierto no lo usa (antes quedaba hasta el final del lote).
+    if (!usedIds().has(a.assetId) && S.previewId !== a.assetId && !Engine.voices.has(a.assetId)) S.buffers.delete(a.assetId);
     try { await DB.put('blobs', a.storageKey, f); S.storedKeys.add(a.storageKey); }
     catch { toast('No se pudo guardar en el celular (¿sin espacio?)'); }
     UI.bank();
