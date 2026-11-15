@@ -545,9 +545,10 @@ input[type=range]{height:40px}
 'use strict';
 /* ===================== Versión ===================== */
 // IMPORTANTE: subir APP_VERSION y agregar una línea a CHANGELOG en CADA cambio de la app.
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.9.0';
 const APP_DATE = '2026-11-14';
 const CHANGELOG = [
+  ['1.9.0', 'Pistas largas en streaming (MP3 comprimido, casi sin RAM) y protección de memoria'],
   ['1.8.0', 'Pedal: más teclas reconocidas (flechas, multimedia), prueba de pedal y asignación manual de teclas'],
   ['1.7.0', 'Aviso con barra de avance mientras se prepara el set, y confirmación «Listo para tocar»'],
   ['1.6.1', 'Carga masiva sin saturar la memoria: se revisa cada archivo sin decodificarlo y se libera al instante'],
@@ -620,13 +621,21 @@ const normAsset = a => ({
   assetId: a.assetId, fileName: a.fileName || a.assetId, displayName: a.displayName || a.fileName || a.assetId,
   category: ['DRUM_LOOP', 'PAD'].includes(a.category) ? a.category : 'OTHER',
   durationSeconds: +a.durationSeconds || 0, storageKey: a.storageKey || ('idb_blob_' + a.assetId), size: +a.size || 0,
+  play: ['ram', 'stream'].includes(a.play) ? a.play : 'auto',
 });
+// Modo de reproducción: "memoria" (descomprimido en RAM, precisión total) o "streaming" (MP3 comprimido, casi sin RAM).
+const STREAM_MIN_SECONDS = 180;
+const isStream = a => !!a && (a.play === 'stream' || (a.play !== 'ram' && (+a.durationSeconds || 0) > STREAM_MIN_SECONDS));
+const estRam = a => (+a.durationSeconds || 0) * ((Engine.ctx && Engine.ctx.sampleRate) || 48000) * 2 * 4;
+// Límite seguro de RAM para el audio descomprimido (según la memoria que informa el celular).
+const RAM_BUDGET = (() => { const gb = Math.min(+navigator.deviceMemory || 4, 8); return Math.max(400, Math.round(gb * 1024 * 0.15)) * 1048576; })();
 
 const S = {
   project: newProject(),
   library: [],            // biblioteca común a todos los sets
   storedKeys: new Set(),  // archivos guardados en el celular (IndexedDB)
   buffers: new Map(),     // assetId -> AudioBuffer (RAM)
+  streams: new Map(),     // assetId -> { url, spare } pistas en streaming
   blobs: new Map(),       // assetId -> archivo recién cargado
   loading: new Set(), errors: new Map(),
   selected: 0, tab: 'bank', previewId: null, stageOpen: false, libQuery: '', mixQuery: '',
@@ -647,10 +656,12 @@ function trackGain(scene, tr) {
   if (scene.tracks.some(t => t.solo) && !tr.solo) return 0;
   return clamp(+tr.volume || 0, 0, 1);
 }
+const isLoaded = id => S.buffers.has(id) || !!(S.streams.get(id) && S.streams.get(id).ok);
+const durOf = id => { const b = S.buffers.get(id); if (b) return b.duration; const a = getAsset(id); return isLoaded(id) && a ? (+a.durationSeconds || 0) : 0; };
 function isReady() {
   if (!Engine.running() || S.loading.size || !P().scenes.length) return false;
   const used = usedIds(); if (!used.size) return false;
-  for (const id of used) if (!S.buffers.has(id)) return false;
+  for (const id of used) if (!isLoaded(id)) return false;
   return true;
 }
 
@@ -708,30 +719,48 @@ const Engine = {
     param.linearRampToValueAtTime(val, start + Math.max(dur, 0.02));
   },
   makeVoice(id, tr, when, bus) {
-    const ctx = this.ctx, buf = S.buffers.get(id); if (!buf) return null;
-    const src = ctx.createBufferSource(); src.buffer = buf; src.loop = tr.loop !== false;
+    const ctx = this.ctx, buf = S.buffers.get(id), rec = !buf && S.streams.get(id);
+    if (!buf && !(rec && rec.ok)) return null;
     const fade = ctx.createGain(); fade.gain.value = 0;
     const vol = ctx.createGain(); vol.gain.value = 0;
     const pan = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
-    src.connect(fade); fade.connect(vol);
+    fade.connect(vol);
     if (pan) { vol.connect(pan); pan.connect(bus); } else vol.connect(bus);
-    let offset = 0;
-    const gs = P().globalSettings, a = getAsset(id);
-    if (gs.quantizeSceneChanges && src.loop && a && a.category === 'DRUM_LOOP' && this.transportStart != null)
-      offset = (((when - this.transportStart) % buf.duration) + buf.duration) % buf.duration; // fase alineada al transporte
-    src.start(when, offset);
-    const v = { assetId: id, src, fade, vol, pan, f: null, dying: false, timer: null, t0: when, off: offset };
-    src.onended = () => {
+    const v = { assetId: id, fade, vol, pan, f: null, dying: false, timer: null, t0: when, off: 0, done: false };
+    const finish = () => {
+      if (v.done) return; v.done = true;
       if (this.voices.get(id) === v) this.voices.delete(id);
       this.dying.delete(v);
-      try { src.disconnect(); fade.disconnect(); vol.disconnect(); pan && pan.disconnect(); } catch {}
+      try { fade.disconnect(); vol.disconnect(); pan && pan.disconnect(); } catch {}
     };
+    if (buf) { // ---- en memoria: precisión de muestra
+      const src = ctx.createBufferSource(); src.buffer = buf; src.loop = tr.loop !== false; src.connect(fade);
+      const gs = P().globalSettings, a = getAsset(id);
+      if (gs.quantizeSceneChanges && src.loop && a && a.category === 'DRUM_LOOP' && this.transportStart != null)
+        v.off = (((when - this.transportStart) % buf.duration) + buf.duration) % buf.duration; // fase alineada al transporte
+      src.start(when, v.off);
+      src.onended = () => { try { src.disconnect(); } catch {} finish(); };
+      v.setLoop = b => { src.loop = b; };
+      v.stopNow = () => { try { src.stop(); } catch {} };
+    } else { // ---- streaming: el navegador descomprime el MP3 de a poco mientras suena
+      let sp = rec.spare; rec.spare = null;
+      if (!sp) sp = makeStreamEl(rec.url);
+      refillSpare(id, rec);
+      const { el, node } = sp;
+      el.loop = tr.loop !== false; node.connect(fade); v.el = el;
+      const go = () => { if (!v.done) el.play().catch(() => toast('No se pudo reproducir ' + ((getAsset(id) || {}).displayName || ''))); };
+      const wait = (when - ctx.currentTime) * 1000;
+      if (wait > 8) v.playT = setTimeout(go, wait); else go();
+      el.onended = () => { dropStreamEl(sp); finish(); };
+      v.setLoop = b => { el.loop = b; };
+      v.stopNow = () => { clearTimeout(v.playT); dropStreamEl(sp); finish(); };
+    }
     return v;
   },
   kill(v, t0, dur) {
     v.dying = true; this.dying.add(v); this.fade(v, 0, t0, dur);
     clearTimeout(v.timer);
-    v.timer = setTimeout(() => { if (v.dying) { try { v.src.stop(); } catch {} this.dying.delete(v); } }, (t0 + dur - this.ctx.currentTime) * 1000 + 150);
+    v.timer = setTimeout(() => { if (v.dying) { v.stopNow(); this.dying.delete(v); } }, (t0 + dur - this.ctx.currentTime) * 1000 + 150);
   },
 
   // Aplica una escena con crossfade: salen, entran y las compartidas continúan (FR-11).
@@ -746,7 +775,7 @@ const Engine = {
     }
     this.busIdx = 1 - this.busIdx;
     const bus = this.buses[this.busIdx];
-    const wanted = new Map(sc.tracks.filter(t => S.buffers.has(t.assetId)).map(t => [t.assetId, t]));
+    const wanted = new Map(sc.tracks.filter(t => isLoaded(t.assetId)).map(t => [t.assetId, t]));
     for (const [id, v] of this.voices) if (!wanted.has(id)) { this.voices.delete(id); this.kill(v, t0, dur); }
     for (const [id, tr] of wanted) {
       let v = this.voices.get(id);
@@ -758,7 +787,7 @@ const Engine = {
       if (v) {
         this.ramp(v.vol.gain, g, t0, dur);
         if (v.pan) this.ramp(v.pan.pan, pan, t0, dur);
-        v.src.loop = tr.loop !== false;
+        v.setLoop(tr.loop !== false);
       } else {
         v = this.makeVoice(id, tr, t0, bus); if (!v) continue;
         v.vol.gain.value = g; if (v.pan) v.pan.pan.value = pan;
@@ -797,21 +826,26 @@ const Engine = {
     UI.afterNav();
   },
   hardReset() {
-    for (const v of [...this.voices.values(), ...this.dying]) { clearTimeout(v.timer); try { v.src.stop(); } catch {} }
+    for (const v of [...this.voices.values(), ...this.dying]) { clearTimeout(v.timer); v.stopNow(); }
     this.voices.clear(); this.dying.clear(); this.currentId = this.posId = null; this.stopped = false; this.xf = null; this.transportStart = null; this.sceneStart = null;
     this.stopPreview();
   },
   preview(id) {
     if (!this.running()) return toast('Inicia el motor de audio primero');
     const same = S.previewId === id; this.stopPreview(); if (same) return;
-    const buf = S.buffers.get(id); if (!buf) return;
-    const ctx = this.ctx, src = ctx.createBufferSource(), g = ctx.createGain();
-    src.buffer = buf; src.loop = true; g.gain.value = 0.85; src.connect(g); g.connect(this.master); src.start();
-    this.previewNode = { src, g }; S.previewId = id;
-    src.onended = () => { if (this.previewNode && this.previewNode.src === src) { this.previewNode = null; S.previewId = null; UI.bank(); } };
+    const ctx = this.ctx, g = ctx.createGain(), buf = S.buffers.get(id), rec = S.streams.get(id);
+    g.gain.value = 0.85; g.connect(this.master);
+    if (buf) {
+      const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true; src.connect(g); src.start();
+      this.previewNode = { g, stop: n => { try { src.stop(n); } catch {} } };
+    } else if (rec && rec.ok) {
+      const sp = makeStreamEl(rec.url); sp.el.loop = true; sp.node.connect(g); sp.el.play().catch(() => {});
+      this.previewNode = { g, stop: () => setTimeout(() => dropStreamEl(sp), 150) };
+    } else return;
+    S.previewId = id;
   },
   stopPreview() {
-    if (this.previewNode) { const { src, g } = this.previewNode, n = this.ctx.currentTime; g.gain.setTargetAtTime(0, n, 0.03); try { src.stop(n + 0.15); } catch {} }
+    if (this.previewNode) { const { g, stop } = this.previewNode, n = this.ctx.currentTime; g.gain.setTargetAtTime(0, n, 0.03); stop(n + 0.15); setTimeout(() => { try { g.disconnect(); } catch {} }, 400); }
     this.previewNode = null; S.previewId = null;
   },
   ramBytes() { let b = 0; for (const buf of S.buffers.values()) b += buf.length * buf.numberOfChannels * 4; return b; },
@@ -823,7 +857,7 @@ function readyReason() {
   if (!S.library.length) return 'Carga tus sonidos en la pestaña Sonidos';
   const used = usedIds();
   if (!used.size) return 'Agrega sonidos a tus escenas en la pestaña Mezcla';
-  const miss = [...used].filter(id => !S.buffers.has(id));
+  const miss = [...used].filter(id => !isLoaded(id));
   if (miss.length) return `Faltan ${miss.length} sonido(s): vuelve a cargar ${miss.slice(0, 2).map(id => (getAsset(id) || {}).fileName || '?').join(', ')} en Sonidos`;
   if (!P().scenes.length) return 'Crea al menos una escena';
   return '';
@@ -835,13 +869,79 @@ function decode(ab) {
   return new Promise((res, rej) => { const p = ctx.decodeAudioData(ab, res, rej); if (p && p.then) p.then(res, rej); });
 }
 const readAB = b => b.arrayBuffer ? b.arrayBuffer() : new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsArrayBuffer(b); });
-const decodingP = new Map();
+const decodingP = new Map(), streamP = new Map();
+// Un elemento <audio> conectado al motor. Lee el MP3 comprimido desde el almacenamiento del celular.
+function makeStreamEl(url) {
+  const el = new Audio(); el.preload = 'auto'; el.src = url;
+  const node = Engine.ensure().createMediaElementSource(el);
+  return { el, node };
+}
+function dropStreamEl(sp) {
+  if (!sp || sp.dropped) return; sp.dropped = true;
+  try { sp.el.pause(); } catch {} sp.el.onended = sp.el.oncanplay = sp.el.onerror = null;
+  try { sp.node.disconnect(); } catch {}
+  sp.el.removeAttribute('src'); try { sp.el.load(); } catch {}
+}
+// Deja listo un elemento de repuesto (ya cargado) para que la próxima entrada sea inmediata.
+function waitCanPlay(sp, ms = 15000) {
+  return new Promise((res, rej) => {
+    if (sp.el.readyState >= 3) return res(sp);
+    const tm = setTimeout(() => fin(new Error('timeout')), ms);
+    const fin = err => { clearTimeout(tm); sp.el.oncanplay = sp.el.onerror = null; err ? rej(err) : res(sp); };
+    sp.el.oncanplay = () => fin(); sp.el.onerror = () => fin(new Error('media'));
+    sp.el.load();
+  });
+}
+function refillSpare(id, rec) {
+  if (rec.spare || rec.filling) return; rec.filling = true;
+  const sp = makeStreamEl(rec.url);
+  waitCanPlay(sp).then(() => { if (S.streams.get(id) === rec && !rec.spare) rec.spare = sp; else dropStreamEl(sp); })
+    .catch(() => dropStreamEl(sp)).finally(() => { rec.filling = false; });
+}
+function releaseStream(id) {
+  const rec = S.streams.get(id); if (!rec) return;
+  S.streams.delete(id); dropStreamEl(rec.spare);
+  setTimeout(() => { try { URL.revokeObjectURL(rec.url); } catch {} }, 2000);
+}
+function prepareStream(id) {
+  const r0 = S.streams.get(id); if (r0 && r0.ok) return Promise.resolve(true);
+  if (streamP.has(id)) return streamP.get(id);
+  const pr = (async () => {
+    const a = getAsset(id); if (!a) return false;
+    S.loading.add(id); S.errors.delete(id); UI.status();
+    try {
+      let blob = S.blobs.get(id);
+      if (!blob && S.storedKeys.has(a.storageKey)) blob = await DB.get('blobs', a.storageKey);
+      if (!blob) { S.errors.set(id, 'Falta el archivo: vuelve a cargarlo'); return false; }
+      const rec = { url: URL.createObjectURL(blob), spare: null, ok: false };
+      S.streams.set(id, rec);
+      const sp = await waitCanPlay(makeStreamEl(rec.url));
+      if (S.streams.get(id) !== rec) { dropStreamEl(sp); return false; }
+      rec.spare = sp; rec.ok = true;
+      const d = sp.el.duration;
+      if (isFinite(d) && d > 0 && Math.abs((a.durationSeconds || 0) - d) > 0.5) { a.durationSeconds = +d.toFixed(3); scheduleLibSave(); }
+      S.buffers.delete(id); // si estaba en memoria, se libera
+      return true;
+    } catch (e) { releaseStream(id); S.errors.set(id, 'No se pudo preparar en streaming'); return false; }
+    finally { S.loading.delete(id); streamP.delete(id); UI.status(); }
+  })();
+  streamP.set(id, pr);
+  return pr;
+}
+// Prepara un sonido en el modo que le corresponde.
+const ensureReady = id => isStream(getAsset(id)) ? prepareStream(id) : ensureDecoded(id);
 // Decodifica un sonido a RAM solo cuando hace falta (al usarlo en el set o al pre-escucharlo).
 function ensureDecoded(id) {
   if (S.buffers.has(id)) return Promise.resolve(true);
   if (decodingP.has(id)) return decodingP.get(id);
   const pr = (async () => {
     const a = getAsset(id); if (!a) return false;
+    // Protección: no descomprimir algo que dejaría al celular sin memoria (cerraría la app).
+    const est = estRam(a), mb = x => Math.round(x / 1048576);
+    if (a.durationSeconds && Engine.ramBytes() + est > RAM_BUDGET) {
+      S.errors.set(id, `Ocupa ~${mb(est)} MB en memoria y el set superaría el límite seguro (${mb(RAM_BUDGET)} MB): cámbialo a Streaming`);
+      UI.status(); return false;
+    }
     S.loading.add(id); S.errors.delete(id); UI.status();
     try {
       let blob = S.blobs.get(id);
@@ -869,21 +969,22 @@ function showPrep(kind, html, pct) {
   document.documentElement.style.setProperty('--hh', $('header').offsetHeight + 'px');
 }
 async function prepareSet() {
-  const ids = [...usedIds()].filter(id => !S.buffers.has(id) && getAsset(id));
+  const ids = [...usedIds()].filter(id => !isLoaded(id) && getAsset(id));
   const total = ids.length; let done = 0;
   const msg = () => `⏳ <b>Preparando el set para tocar: ${done} de ${total} sonido(s)…</b><br>Espera el aviso «Listo para tocar» antes de lanzar escenas.`;
   if (total) showPrep('busy', msg(), 0);
   const startTxt = () => { if (!$('#startOverlay').hidden) $('#startMsg').textContent = `Preparando el set: ${done} de ${total} sonido(s)… Puedes iniciar el motor mientras tanto.`; };
   if (total) startTxt();
-  for (const id of ids) { await ensureDecoded(id); done++; if (total) { showPrep('busy', msg(), Math.round(done / total * 100)); startTxt(); } UI.status(); }
+  for (const id of ids) { await ensureReady(id); done++; if (total) { showPrep('busy', msg(), Math.round(done / total * 100)); startTxt(); } UI.status(); }
   if (total) {
-    const loaded = [...usedIds()].every(id => S.buffers.has(id));
+    const loaded = [...usedIds()].every(id => isLoaded(id));
     if (loaded && !Engine.running()) { showPrep(null); $('#startMsg').textContent = `✓ Los ${usedIds().size} sonido(s) del set están listos. Toca el botón para empezar.`; }
-    else if (isReady()) showPrep('ok', `✓ <b>Listo para tocar</b> · ${usedIds().size} sonido(s) en memoria (${(Engine.ramBytes() / 1048576).toFixed(0)} MB)`);
+    else if (isReady()) showPrep('ok', `✓ <b>Listo para tocar</b> · ${usedIds().size} sonido(s) listos (${(Engine.ramBytes() / 1048576).toFixed(0)} MB en memoria${S.streams.size ? ` · ${S.streams.size} en streaming` : ''})`);
     else showPrep('bad', '⚠ <b>El set no está listo:</b> ' + esc(readyReason() || 'revisa los sonidos en la pestaña Sonidos'));
   }
   const used = usedIds();
-  for (const id of [...S.buffers.keys()]) if (!used.has(id) && id !== S.previewId && !Engine.voices.has(id)) S.buffers.delete(id);
+  for (const id of [...S.buffers.keys()]) if ((!used.has(id) || isStream(getAsset(id))) && id !== S.previewId && !Engine.voices.has(id)) S.buffers.delete(id);
+  for (const id of [...S.streams.keys()]) if ((!used.has(id) || !isStream(getAsset(id))) && id !== S.previewId && !Engine.voices.has(id) && ![...Engine.dying].some(v => v.assetId === id)) releaseStream(id);
   UI.all();
 }
 let libTimer;
@@ -958,7 +1059,7 @@ async function deleteSound(a) {
   if (S.previewId === a.assetId) Engine.stopPreview();
   const v = Engine.voices.get(a.assetId); if (v) { Engine.voices.delete(a.assetId); Engine.kill(v, Engine.ctx.currentTime, 0.3); }
   S.library = S.library.filter(x => x !== a);
-  S.buffers.delete(a.assetId); S.blobs.delete(a.assetId); S.errors.delete(a.assetId);
+  S.buffers.delete(a.assetId); releaseStream(a.assetId); S.blobs.delete(a.assetId); S.errors.delete(a.assetId);
   try { await DB.del('blobs', a.storageKey); } catch {} S.storedKeys.delete(a.storageKey);
   for (const m of all) if (m.projectId !== cur && (m.scenes || []).some(s => (s.tracks || []).some(t => t.assetId === a.assetId))) {
     m.scenes.forEach(s => s.tracks = (s.tracks || []).filter(t => t.assetId !== a.assetId));
@@ -970,7 +1071,7 @@ async function deleteSound(a) {
 }
 async function togglePreview(id) {
   if (S.previewId === id) Engine.stopPreview();
-  else { if (!Engine.running()) await Engine.start(); if (await ensureDecoded(id)) Engine.preview(id); }
+  else { if (!Engine.running()) await Engine.start(); if (await ensureReady(id)) Engine.preview(id); }
   UI.bank(); UI.mixAdd(); UI.transport();
 }
 
@@ -980,7 +1081,7 @@ function setSaveState(t) { const e = $('#saveState'); if (e) e.textContent = t; 
 function scheduleSave() { clearTimeout(saveTimer); setSaveState('Cambios sin guardar…'); saveTimer = setTimeout(saveProject, 1200); }
 function cleanManifest() {
   reindex(); const m = deepCopy(P()), used = usedIds(m);
-  m.audioPool = S.library.filter(a => used.has(a.assetId)).map(a => ({ assetId: a.assetId, fileName: a.fileName, displayName: a.displayName, category: a.category, durationSeconds: a.durationSeconds, storageKey: a.storageKey }));
+  m.audioPool = S.library.filter(a => used.has(a.assetId)).map(a => ({ assetId: a.assetId, fileName: a.fileName, displayName: a.displayName, category: a.category, durationSeconds: a.durationSeconds, storageKey: a.storageKey, play: a.play }));
   return m;
 }
 async function saveProject(manual) {
@@ -1099,7 +1200,7 @@ async function importProject(file) {
   Engine.hardReset(); S.project = m; S.selected = 0;
   if (Engine.master) Engine.setMaster(m.globalSettings.masterVolume);
   await saveProject(); UI.all(); await prepareSet();
-  const miss = [...usedIds()].filter(id => !S.buffers.has(id)).length;
+  const miss = [...usedIds()].filter(id => !isLoaded(id)).length;
   toast(miss ? `Set importado. Faltan ${miss} sonido(s): cárgalos en Sonidos con el mismo nombre de archivo` : 'Set importado · Listo para en vivo');
 }
 
@@ -1114,7 +1215,7 @@ const UI = {
     else if (S.loading.size) t.textContent = `Preparando sonidos (${S.loading.size})…`;
     else t.textContent = readyReason();
     $('#setName').textContent = P().projectName;
-    $('#memInfo').textContent = `${S.library.length} sonido(s) en tu biblioteca` + (S.buffers.size ? ` · ${S.buffers.size} en memoria (${(Engine.ramBytes() / 1048576).toFixed(0)} MB)` : '');
+    $('#memInfo').textContent = `${S.library.length} sonido(s) en tu biblioteca` + (S.buffers.size ? ` · ${S.buffers.size} en memoria (${(Engine.ramBytes() / 1048576).toFixed(0)} MB)` : '') + (S.streams.size ? ` · ${S.streams.size} en streaming` : '');
     this.transport();
   },
   transport() {
@@ -1141,7 +1242,7 @@ const UI = {
       return `<div class="asset ${catClass(a)}" data-id="${id}">
         <button class="btn icon prevbtn" data-act="preview" ${ok ? '' : 'disabled'} aria-label="Escuchar">${S.previewId === id ? '■' : '▶'}</button>
         <div class="grow"><input class="name" data-act="rename" value="${esc(a.displayName)}" aria-label="Nombre">
-          <div class="sub2"><select class="lbl-sel" data-act="label" aria-label="Etiqueta">${Object.entries(LABELS).map(([k, v]) => `<option value="${k}" ${a.category === k ? 'selected' : ''}>${v}</option>`).join('')}</select>${st}${uses ? `<span class="tag ok">en ${uses} escena(s)</span>` : ''}</div></div>
+          <div class="sub2"><select class="lbl-sel" data-act="label" aria-label="Etiqueta">${Object.entries(LABELS).map(([k, v]) => `<option value="${k}" ${a.category === k ? 'selected' : ''}>${v}</option>`).join('')}</select><select class="lbl-sel" data-act="mode" aria-label="Modo de reproducción"><option value="auto" ${a.play === 'auto' ? 'selected' : ''}>Auto · ${isStream({ ...a, play: 'auto' }) ? '📀 streaming' : '⚡ memoria'}</option><option value="ram" ${a.play === 'ram' ? 'selected' : ''}>⚡ Memoria</option><option value="stream" ${a.play === 'stream' ? 'selected' : ''}>📀 Streaming</option></select>${st}${uses ? `<span class="tag ok">en ${uses} escena(s)</span>` : ''}</div></div>
         <button class="btn icon ghost" data-act="del" aria-label="Eliminar">✕</button></div>`;
     };
     $('#libList').innerHTML = list.map(row).join('') || `<p class="empty">${S.library.length ? 'Ningún sonido coincide con la búsqueda.' : 'Tu biblioteca está vacía. Carga tus audios con el botón de arriba.'}</p>`;
@@ -1173,7 +1274,7 @@ const UI = {
     $('#mixLive').textContent = sc.sceneId === Engine.currentId ? '● Sonando: los cambios se oyen en vivo' : '';
     const row = t => {
       const id = t.assetId, a = getAsset(id), cls = catClass(a);
-      const st = S.buffers.has(id) ? '' : S.loading.has(id) ? '<span class="tag warn">preparando…</span>' : '<span class="tag bad">falta</span>';
+      const st = isLoaded(id) ? (S.streams.has(id) ? '<span class="tag">streaming</span>' : '') : S.loading.has(id) ? '<span class="tag warn">preparando…</span>' : '<span class="tag bad">falta</span>';
       return `<div class="mrow on ${cls}" data-id="${id}">
         <div class="mhead"><span class="sw ${cls}"></span><span class="mname">${esc(a ? a.displayName : '(sonido eliminado)')}</span>${st}</div>
         <div class="mbtns"><button class="tgl ${t.mute ? 'm' : ''}" data-act="mute" title="Silenciar">M</button><button class="tgl ${t.solo ? 's' : ''}" data-act="solo" title="Solo">S</button><button class="tgl ${t.loop !== false ? 'l' : ''}" data-act="loop" title="Repetir en bucle">⟲</button><button class="tgl x" data-act="remove" title="Quitar de esta escena">✕</button></div>
@@ -1235,7 +1336,7 @@ const fmtClock = s => { s = Math.max(0, Math.floor(+s || 0)); return `${Math.flo
 // Duración de la escena = el sonido audible más largo (una pasada).
 function sceneLength(sc) {
   let len = 0;
-  for (const tr of sc.tracks) { const buf = S.buffers.get(tr.assetId); if (buf && trackGain(sc, tr) > 0) len = Math.max(len, buf.duration); }
+  for (const tr of sc.tracks) { const d = durOf(tr.assetId); if (d && trackGain(sc, tr) > 0) len = Math.max(len, d); }
   return len;
 }
 // Se llama cada 250 ms: actualiza la barra y, si corresponde, pasa sola a la siguiente escena.
@@ -1348,6 +1449,11 @@ function bind() {
   });
   $('#libList').addEventListener('change', e => {
     const row = e.target.closest('.asset'), a = row && getAsset(row.dataset.id); if (!a) return;
+    if (e.target.dataset.act === 'mode') {
+      a.play = e.target.value; S.errors.delete(a.assetId); scheduleLibSave(); scheduleSave();
+      if (!Engine.voices.has(a.assetId)) { if (isStream(a)) S.buffers.delete(a.assetId); else releaseStream(a.assetId); }
+      UI.bank(); prepareSet(); return;
+    }
     if (e.target.dataset.act === 'label') { a.category = e.target.value; scheduleLibSave(); scheduleSave(); UI.bank(); UI.mix(); }
     else if (e.target.dataset.act === 'rename') { scheduleSave(); UI.mix(); UI.bank(); }
   });
@@ -1403,7 +1509,7 @@ function bind() {
     if (act === 'add') {
       if (!sc.tracks.some(t => t.assetId === id)) sc.tracks.push({ assetId: id, volume: 0.8, pan: 0, loop: true, mute: false, solo: false });
       UI.mix(); UI.scenes(); scheduleSave();
-      await ensureDecoded(id); UI.mix(); UI.status(); liveApply(0.3);
+      await ensureReady(id); UI.mix(); UI.status(); liveApply(0.3);
       return toast('Agregado a la escena');
     }
     const t = sc.tracks.find(x => x.assetId === id); if (!t) return;
@@ -1525,11 +1631,11 @@ async function openCheck() {
 }
 function renderCheck() {
   if (!S.checkOpen) return;
-  const used = [...usedIds()], loaded = used.filter(id => S.buffers.has(id)).length, items = [];
+  const used = [...usedIds()], loaded = used.filter(id => isLoaded(id)).length, items = [];
   const add = (st, txt, sub) => items.push(`<li class="${st}"><b>${st === 'ok' ? '✓' : st === 'warn' ? '!' : '✕'}</b><div>${txt}${sub ? `<small>${sub}</small>` : ''}</div></li>`);
   add(Engine.running() ? 'ok' : 'bad', 'Motor de audio', Engine.running() ? 'Activo' : 'Toca la pantalla para activarlo');
   const audOk = used.length && loaded === used.length && !S.loading.size;
-  add(audOk ? 'ok' : 'bad', `Sonidos del set listos: ${loaded}/${used.length}`, audOk ? `${(Engine.ramBytes() / 1048576).toFixed(0)} MB cargados en RAM` : esc(readyReason()));
+  add(audOk ? 'ok' : 'bad', `Sonidos del set listos: ${loaded}/${used.length}`, audOk ? `${(Engine.ramBytes() / 1048576).toFixed(0)} MB en RAM` + (S.streams.size ? ` · ${S.streams.size} pista(s) en streaming` : '') : esc(readyReason()));
   const sc = P().scenes, empty = sc.filter(s => !s.tracks.length).length;
   add(sc.length ? (empty ? 'warn' : 'ok') : 'bad', `Setlist: ${sc.length} escena(s)`, empty ? `${empty} escena(s) sin pistas: sonarán en silencio` : '');
   add(CHK.wake ? 'ok' : 'warn', 'Pantalla siempre encendida', CHK.wake === null ? 'Comprobando…' : CHK.wake ? 'Activado' : 'No disponible aquí: desactiva el apagado automático de pantalla');
